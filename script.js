@@ -12,7 +12,7 @@
  */
 
 /* ─── Server-side Leaderboard Endpoint ─── */
-const LEADERBOARD_API = "/api/leaderboard";
+const LEADERBOARD_API = "api/leaderboard";
 
 /* ─── Game State ─── */
 const GameState = {

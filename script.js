@@ -15,6 +15,7 @@
 const LEADERBOARD_API = "api/leaderboard";
 const GAME_DURATION_SECONDS = 60;
 const PLAYER_ID_KEY = "dontCatchThatPlayerId";
+const PLAYER_PROFILE_KEY = "dontCatchThatProfile";
 
 /* ─── Game State ─── */
 const GameState = {
@@ -198,6 +199,8 @@ function captureSelfie() {
   ctx.restore();
 
   GameState.selfieData = canvas.toDataURL('image/jpeg', 0.7);
+  const currentName = sanitizeName($('playerName').value.trim());
+  if (currentName.length >= 2) GameState.playerName = currentName;
 
   // Show preview, hide video
   video.classList.add('hidden');
@@ -1036,6 +1039,33 @@ function getOrCreatePlayerId() {
   return playerId;
 }
 
+function saveProfileLocally() {
+  if (!GameState.playerId || !GameState.playerName || !GameState.selfieData) return;
+
+  localStorage.setItem(PLAYER_PROFILE_KEY, JSON.stringify({
+    playerId: GameState.playerId,
+    playerName: GameState.playerName,
+    selfieData: GameState.selfieData,
+  }));
+}
+
+function restoreProfileLocally() {
+  try {
+    const rawProfile = localStorage.getItem(PLAYER_PROFILE_KEY);
+    if (!rawProfile) return;
+
+    const profile = JSON.parse(rawProfile);
+    if (!profile?.playerName || !profile?.selfieData) return;
+
+    GameState.playerId = profile.playerId || GameState.playerId;
+    GameState.playerName = sanitizeName(profile.playerName);
+    GameState.selfieData = profile.selfieData;
+    $('playerName').value = GameState.playerName;
+  } catch (err) {
+    console.warn('Profile restore skipped:', err);
+  }
+}
+
 function getTargetForRound(round) {
   if (round <= ROUND_TARGETS.length) return ROUND_TARGETS[round - 1];
 
@@ -1536,6 +1566,21 @@ function updateProfileDisplays() {
   }
 }
 
+function drawSelfiePreview() {
+  if (!GameState.selfieData || !$('selfieCanvas')) return;
+
+  const canvas = $('selfieCanvas');
+  const ctx = canvas.getContext('2d');
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.naturalWidth || 640;
+    canvas.height = img.naturalHeight || 480;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  };
+  img.src = GameState.selfieData;
+}
+
 function hasCompleteProfile() {
   return sanitizeName($('playerName').value.trim()).length >= 2 && GameState.selfieData !== '';
 }
@@ -1551,6 +1596,7 @@ function syncRegistrationProfileUI() {
   if (ready) {
     GameState.playerName = sanitizeName($('playerName').value.trim());
     updateProfileDisplays();
+    saveProfileLocally();
     stopStream(cameraStream);
     cameraStream = null;
   }
@@ -1558,6 +1604,7 @@ function syncRegistrationProfileUI() {
 
 function updateRegistrationState() {
   if (GameState.selfieData) {
+    drawSelfiePreview();
     $('cameraVideo').classList.add('hidden');
     $('selfieCanvas').classList.remove('hidden');
     $('cameraOverlay').classList.add('hidden');
@@ -1661,18 +1708,10 @@ function saveProfile() {
   GameState.selfieData = GameState.modalSelfieData || GameState.selfieData;
   $('playerName').value = name;
 
-  const canvas = $('selfieCanvas');
-  const ctx = canvas.getContext('2d');
-  const img = new Image();
-  img.onload = () => {
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    ctx.drawImage(img, 0, 0);
-  };
-  img.src = GameState.selfieData;
-
+  drawSelfiePreview();
   updateProfileDisplays();
   updateRegistrationState();
+  saveProfileLocally();
   syncLeaderboardProfile();
   closeProfileModal();
 }
@@ -1727,6 +1766,9 @@ document.addEventListener('visibilitychange', () => {
 ═══════════════════════════════════════════════════════════════ */
 (function init() {
   GameState.playerId = getOrCreatePlayerId();
+  restoreProfileLocally();
+  updateProfileDisplays();
+  updateRegistrationState();
   showScreen('registrationScreen');
 
   // Unlock AudioContext on first interaction

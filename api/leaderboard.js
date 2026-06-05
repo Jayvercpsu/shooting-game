@@ -19,13 +19,11 @@ function isValidSelfie(selfie) {
     && /^data:image\/(jpeg|png|webp);base64,/.test(selfie);
 }
 
-function isSameDay(isoStr) {
-  if (!isoStr) return false;
-
-  const date = new Date(isoStr);
-  if (Number.isNaN(date.getTime())) return false;
-
-  return date.toDateString() === new Date().toDateString();
+function sanitizePlayerId(playerId) {
+  return String(playerId || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, "")
+    .slice(0, 80);
 }
 
 async function readBody(req) {
@@ -90,9 +88,14 @@ async function updateScores(scores) {
 }
 
 async function saveScore(payload) {
+  const playerId = sanitizePlayerId(payload.playerId);
   const name = sanitizeName(payload.name);
   const score = Math.floor(Number(payload.score));
   const selfie = payload.selfie;
+
+  if (!playerId) {
+    return { error: "Player ID is required." };
+  }
 
   if (!name) {
     return { error: "Player name is required." };
@@ -107,25 +110,69 @@ async function saveScore(payload) {
   }
 
   const existingScores = await fetchScores();
-  const newEntry = {
-    name,
-    score,
-    selfie,
-    date: new Date().toISOString(),
-  };
-
-  const filteredScores = existingScores.filter(entry =>
-    !(entry.name === name && Number(entry.score || 0) <= score && isSameDay(entry.date))
+  const existingIndex = existingScores.findIndex(entry =>
+    entry.playerId === playerId || (!entry.playerId && entry.name === name)
   );
+  const now = new Date().toISOString();
 
-  filteredScores.push(newEntry);
-  filteredScores.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  if (existingIndex >= 0) {
+    const existingEntry = existingScores[existingIndex];
+    existingScores[existingIndex] = {
+      ...existingEntry,
+      playerId,
+      name,
+      selfie,
+      score: Math.max(Number(existingEntry.score || 0), score),
+      date: now,
+    };
+  } else {
+    existingScores.push({
+      playerId,
+      name,
+      score,
+      selfie,
+      date: now,
+    });
+  }
 
-  const top100 = filteredScores.slice(0, 100);
+  existingScores.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+
+  const top100 = existingScores.slice(0, 100);
   await updateScores(top100);
 
-  const rank = top100.findIndex(entry => entry.date === newEntry.date) + 1;
+  const rank = top100.findIndex(entry => entry.playerId === playerId) + 1;
   return { rank: rank > 0 ? rank : null, scores: top100 };
+}
+
+async function updateProfile(payload) {
+  const playerId = sanitizePlayerId(payload.playerId);
+  const name = sanitizeName(payload.name);
+  const selfie = payload.selfie;
+
+  if (!playerId) return { error: "Player ID is required." };
+  if (!name) return { error: "Player name is required." };
+  if (!isValidSelfie(selfie)) return { error: "Selfie image is invalid." };
+
+  const existingScores = await fetchScores();
+  const existingIndex = existingScores.findIndex(entry =>
+    entry.playerId === playerId || (!entry.playerId && entry.name === name)
+  );
+
+  if (existingIndex < 0) {
+    return { updated: false, scores: existingScores };
+  }
+
+  existingScores[existingIndex] = {
+    ...existingScores[existingIndex],
+    playerId,
+    name,
+    selfie,
+  };
+
+  existingScores.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  await updateScores(existingScores.slice(0, 100));
+
+  return { updated: true, scores: existingScores.slice(0, 100) };
 }
 
 module.exports = async function leaderboardHandler(req, res) {
@@ -141,7 +188,13 @@ module.exports = async function leaderboardHandler(req, res) {
       return sendJson(res, 200, result);
     }
 
-    res.setHeader("Allow", "GET, POST");
+    if (req.method === "PATCH") {
+      const result = await updateProfile(await readBody(req));
+      if (result.error) return sendJson(res, 400, { message: result.error });
+      return sendJson(res, 200, result);
+    }
+
+    res.setHeader("Allow", "GET, POST, PATCH");
     return sendJson(res, 405, { message: "Method not allowed." });
   } catch (error) {
     console.error(error);

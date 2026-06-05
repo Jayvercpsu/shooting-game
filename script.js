@@ -13,9 +13,12 @@
 
 /* ─── Server-side Leaderboard Endpoint ─── */
 const LEADERBOARD_API = "api/leaderboard";
+const GAME_DURATION_SECONDS = 60;
+const PLAYER_ID_KEY = "dontCatchThatPlayerId";
 
 /* ─── Game State ─── */
 const GameState = {
+  playerId:     "",
   playerName:   "",
   selfieData:   "",        // base64 image
   score:        0,
@@ -23,6 +26,9 @@ const GameState = {
   targetScore:  30,
   activeGood:   "😂",
   activeBad:    "💩",
+  activeGoodList: ["😂"],
+  activeBadList:  ["💩"],
+  timeLeft:     GAME_DURATION_SECONDS,
   isRunning:    false,
   isPaused:     false,
   isRoundTransition: false,
@@ -268,6 +274,7 @@ function startGame() {
   GameState.score          = 0;
   GameState.round          = 1;
   GameState.targetScore    = getTargetForRound(1);
+  GameState.timeLeft       = GAME_DURATION_SECONDS;
   GameState.isRunning      = false;
   GameState.isPaused       = false;
   GameState.isRoundTransition = false;
@@ -898,7 +905,9 @@ function renderLeaderboard(scores) {
   // Table rows
   scores.forEach((entry, i) => {
     const rank  = i + 1;
-    const isMe  = entry.name === GameState.playerName && entry.score === GameState.score;
+    const isMe  = entry.playerId
+      ? entry.playerId === GameState.playerId
+      : entry.name === GameState.playerName && entry.score === GameState.score;
 
     const tr = document.createElement('tr');
     tr.style.animationDelay = `${i * 0.04}s`;
@@ -942,7 +951,12 @@ async function savePlayerScore(name, score, selfie) {
     const res = await fetch(LEADERBOARD_API, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, score, selfie }),
+      body: JSON.stringify({
+        playerId: GameState.playerId,
+        name,
+        score,
+        selfie,
+      }),
     });
 
     if (!res.ok) throw new Error(`Save failed: HTTP ${res.status}`);
@@ -1010,8 +1024,16 @@ function pickRandom(list) {
 function sampleEmojis(list, count) {
   return [...list]
     .sort(() => Math.random() - 0.5)
-    .slice(0, count)
-    .join(' ');
+    .slice(0, count);
+}
+
+function getOrCreatePlayerId() {
+  let playerId = localStorage.getItem(PLAYER_ID_KEY);
+  if (!playerId) {
+    playerId = window.crypto?.randomUUID?.() || `player-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem(PLAYER_ID_KEY, playerId);
+  }
+  return playerId;
 }
 
 function getTargetForRound(round) {
@@ -1025,8 +1047,10 @@ function getTargetForRound(round) {
 }
 
 function selectRoundEmojis() {
-  GameState.activeGood = sampleEmojis(GOOD_EMOJIS, 3);
-  GameState.activeBad  = sampleEmojis(BAD_EMOJIS, 3);
+  GameState.activeGoodList = sampleEmojis(GOOD_EMOJIS, 3);
+  GameState.activeBadList  = sampleEmojis(BAD_EMOJIS, 3);
+  GameState.activeGood = GameState.activeGoodList.join(' ');
+  GameState.activeBad  = GameState.activeBadList.join(' ');
   updateHUD();
 }
 
@@ -1096,12 +1120,32 @@ function spawnWave() {
   }
 }
 
+async function syncLeaderboardProfile() {
+  if (!GameState.playerId || !GameState.playerName || !GameState.selfieData) return;
+
+  try {
+    await fetch(LEADERBOARD_API, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        playerId: GameState.playerId,
+        name: GameState.playerName,
+        selfie: GameState.selfieData,
+      }),
+    });
+  } catch (err) {
+    console.warn('Profile sync skipped:', err);
+  }
+}
+
 function startSurvivalTimer() {
   clearInterval(GameState.gameTimer);
   GameState.gameTimer = setInterval(() => {
     if (!GameState.isRunning || GameState.isPaused || GameState.isRoundTransition) return;
     GameState.elapsedSeconds++;
+    GameState.timeLeft = Math.max(0, GameState.timeLeft - 1);
     updateHUD();
+    if (GameState.timeLeft <= 0) endGame();
   }, 1000);
 }
 
@@ -1128,7 +1172,7 @@ function spawnEmoji() {
   const rect = area.getBoundingClientRect();
   const goodChance = Math.max(0.48, 0.68 - ((GameState.round - 1) * 0.018));
   const isGood = Math.random() < goodChance;
-  const emoji = isGood ? pickRandom(GOOD_EMOJIS) : pickRandom(BAD_EMOJIS);
+  const emoji = isGood ? pickRandom(GameState.activeGoodList) : pickRandom(GameState.activeBadList);
   const size = Math.round(Math.max(34, Math.min(58, rect.width * 0.11)));
   const x = Math.random() * Math.max(1, rect.width - size);
 
@@ -1385,7 +1429,7 @@ function updateHUD() {
   if ($('scoreDisplay')) $('scoreDisplay').textContent = GameState.score.toLocaleString();
   if ($('roundDisplay')) $('roundDisplay').textContent = GameState.round;
   if ($('targetDisplay')) $('targetDisplay').textContent = GameState.targetScore.toLocaleString();
-  if ($('timerDisplay')) $('timerDisplay').textContent = formatSurvivalTime(GameState.elapsedSeconds);
+  if ($('timerDisplay')) $('timerDisplay').textContent = formatSurvivalTime(GameState.timeLeft);
   if ($('catchEmojiDisplay')) $('catchEmojiDisplay').textContent = GameState.activeGood;
   if ($('avoidEmojiDisplay')) $('avoidEmojiDisplay').textContent = GameState.activeBad;
 }
@@ -1458,7 +1502,7 @@ function endGame() {
   $('resultName').textContent  = GameState.playerName;
   $('resultScore').textContent = finalScore.toLocaleString();
   $('resultRank').textContent  = '';
-  $('resultExtra').textContent = `Round ${GameState.round} • Time survived ${formatSurvivalTime(GameState.elapsedSeconds)}`;
+  $('resultExtra').textContent = `Round ${GameState.round} • Played ${formatSurvivalTime(GameState.elapsedSeconds)}`;
   $('savingStatus').innerHTML  = '<span class="saving-spinner"></span> Saving score online...';
   $('savingStatus').style.display = 'flex';
 
@@ -1629,6 +1673,7 @@ function saveProfile() {
 
   updateProfileDisplays();
   updateRegistrationState();
+  syncLeaderboardProfile();
   closeProfileModal();
 }
 
@@ -1681,6 +1726,7 @@ document.addEventListener('visibilitychange', () => {
    INIT
 ═══════════════════════════════════════════════════════════════ */
 (function init() {
+  GameState.playerId = getOrCreatePlayerId();
   showScreen('registrationScreen');
 
   // Unlock AudioContext on first interaction

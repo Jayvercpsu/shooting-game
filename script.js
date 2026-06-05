@@ -19,17 +19,52 @@ const GameState = {
   playerName:   "",
   selfieData:   "",        // base64 image
   score:        0,
-  timeLeft:     60,
-  combo:        1,
-  comboTimer:   null,
-  hitStreak:    0,
+  round:        1,
+  targetScore:  30,
+  activeGood:   "😂",
+  activeBad:    "💩",
   isRunning:    false,
+  isPaused:     false,
+  isRoundTransition: false,
   gameTimer:    null,
-  targets:      [],
+  spawnInterval:null,
+  randomEventTimer: null,
+  emojis:       [],
   particles:    [],
   animFrameId:  null,
+  elapsedSeconds: 0,
+  spawnDelay:   1050,
+  fallSpeed:    1.4,
   lastRank:     null,
+  modalSelfieData: "",
 };
+
+const GOOD_EMOJIS = ["😂", "🤣", "😆", "😎", "🤩", "😍", "🥳", "🤪", "😺", "😋", "😁", "🤗"];
+const BAD_EMOJIS  = ["💩", "🤮", "🤡", "💀", "☠️", "👹", "👺", "😵", "😡"];
+const ROUND_TARGETS = [30, 60, 100, 150, 220];
+const WARNING_MESSAGES = [
+  "AYAW ANG TAE BOSS! 💩",
+  "MALI MAN NA 😭",
+  "NABIKIL KA SA CLOWN 🤡",
+  "LUOD KAAYO 🤮",
+  "MINUS KA OY 😂",
+  "NGANONG IMONG GI-CLICK NA 😭",
+  "AYAW PAGPADALA SA TEMPTATION 🤣",
+];
+const ROUND_MESSAGES = [
+  "GRABE KA BOSS 😎",
+  "EMOJI MASTER 😂",
+  "HALA KUSOG MAN DIAY KA 🤣",
+  "PRO PLAYER DETECTED 🔥",
+  "WALAY MAKAPUGONG NIMO 😎",
+];
+const RANDOM_EVENTS = [
+  "AYAW KAPOY CLICK 😂",
+  "TAGAAN TIKA COFFEE ☕",
+  "ANG TAE NAGHULAT NIMO 💩",
+  "LIKAY SA CLOWN BOSS 🤡",
+  "EMOJI GOD MODE 😎",
+];
 
 /* ─── DOM Refs ─── */
 const $ = id => document.getElementById(id);
@@ -38,6 +73,10 @@ const $ = id => document.getElementById(id);
    SCREEN MANAGEMENT
 ═══════════════════════════════════════════════════════════════ */
 function showScreen(id) {
+  if (id !== 'registrationScreen' && cameraStream) {
+    stopStream(cameraStream);
+    cameraStream = null;
+  }
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   $(id).classList.add('active');
 }
@@ -106,6 +145,13 @@ window.addEventListener('mousemove', e => {
    CAMERA & SELFIE
 ═══════════════════════════════════════════════════════════════ */
 let cameraStream = null;
+let modalCameraStream = null;
+let profileWasPaused = false;
+let backWasPaused = false;
+
+function stopStream(stream) {
+  if (stream) stream.getTracks().forEach(track => track.stop());
+}
 
 async function startCamera() {
   const video   = $('cameraVideo');
@@ -154,8 +200,10 @@ function captureSelfie() {
   rtkBtn.classList.remove('hidden');
 
   // Stop stream
-  if (cameraStream) { cameraStream.getTracks().forEach(t => t.stop()); cameraStream = null; }
+  stopStream(cameraStream);
+  cameraStream = null;
 
+  updateProfileDisplays();
   validateForm();
 }
 
@@ -173,7 +221,6 @@ function retakeSelfie() {
 
   GameState.selfieData = '';
   validateForm();
-  startCamera(); // Auto-reopen camera
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -197,6 +244,7 @@ function validateForm() {
   $('selfieError').textContent = '';
 
   $('startGameBtn').disabled = !(hasName && hasSelfie);
+  syncRegistrationProfileUI();
 }
 
 /* Sanitize name: strip HTML/script tags */
@@ -217,12 +265,20 @@ function startGame() {
   GameState.playerName = sanitizeName(rawName);
 
   // Reset state
-  GameState.score     = 0;
-  GameState.timeLeft  = 60;
-  GameState.combo     = 1;
-  GameState.hitStreak = 0;
-  GameState.targets   = [];
-  GameState.particles = [];
+  GameState.score          = 0;
+  GameState.round          = 1;
+  GameState.targetScore    = getTargetForRound(1);
+  GameState.isRunning      = false;
+  GameState.isPaused       = false;
+  GameState.isRoundTransition = false;
+  GameState.elapsedSeconds = 0;
+  GameState.spawnDelay     = 1050;
+  GameState.fallSpeed      = 1.4;
+  GameState.emojis         = [];
+  GameState.particles      = [];
+  clearGameplayTimers();
+  selectRoundEmojis();
+  updateProfileDisplays();
 
   runCountdown();
 }
@@ -641,6 +697,50 @@ function playSound(type, targetType) {
 
   try {
     switch (type) {
+      case 'correct': {
+        [520, 740, 980].forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, now + i * 0.04);
+          gain.gain.setValueAtTime(0.22, now + i * 0.04);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.04 + 0.14);
+          osc.start(now + i * 0.04);
+          osc.stop(now + i * 0.04 + 0.14);
+        });
+        break;
+      }
+      case 'wrong': {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(180, now);
+        osc.frequency.exponentialRampToValueAtTime(70, now + 0.22);
+        gain.gain.setValueAtTime(0.25, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+        osc.start(now);
+        osc.stop(now + 0.22);
+        break;
+      }
+      case 'victory': {
+        [440, 554, 659, 880, 1108].forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, now + i * 0.08);
+          gain.gain.setValueAtTime(0.25, now + i * 0.08);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.22);
+          osc.start(now + i * 0.08);
+          osc.stop(now + i * 0.08 + 0.22);
+        });
+        break;
+      }
       case 'hit': {
         const freqMap = { green: 440, blue: 660, red: 880, gold: 1100 };
         const freq = freqMap[targetType] || 440;
@@ -900,6 +1000,638 @@ function isSameDay(isoStr) {
   } catch { return false; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════
+   DON'T CATCH THAT! ENDLESS EMOJI SURVIVAL GAMEPLAY
+═══════════════════════════════════════════════════════════════════════ */
+function pickRandom(list) {
+  return list[Math.floor(Math.random() * list.length)];
+}
+
+function sampleEmojis(list, count) {
+  return [...list]
+    .sort(() => Math.random() - 0.5)
+    .slice(0, count)
+    .join(' ');
+}
+
+function getTargetForRound(round) {
+  if (round <= ROUND_TARGETS.length) return ROUND_TARGETS[round - 1];
+
+  let target = ROUND_TARGETS[ROUND_TARGETS.length - 1];
+  for (let r = ROUND_TARGETS.length + 1; r <= round; r++) {
+    target += 100 + (r * 20);
+  }
+  return target;
+}
+
+function selectRoundEmojis() {
+  GameState.activeGood = sampleEmojis(GOOD_EMOJIS, 3);
+  GameState.activeBad  = sampleEmojis(BAD_EMOJIS, 3);
+  updateHUD();
+}
+
+function updateDifficulty() {
+  GameState.targetScore = getTargetForRound(GameState.round);
+  GameState.spawnDelay  = Math.max(230, 780 - ((GameState.round - 1) * 70));
+  GameState.fallSpeed   = 2.05 + ((GameState.round - 1) * 0.34);
+}
+
+function clearGameplayTimers() {
+  clearInterval(GameState.gameTimer);
+  clearInterval(GameState.spawnInterval);
+  clearTimeout(GameState.randomEventTimer);
+  cancelAnimationFrame(GameState.animFrameId);
+  GameState.gameTimer = null;
+  GameState.spawnInterval = null;
+  GameState.randomEventTimer = null;
+  GameState.animFrameId = null;
+}
+
+function clearGameArea() {
+  const area = $('gameArea');
+  if (area) area.innerHTML = '';
+  GameState.emojis = [];
+}
+
+function beginGameplay() {
+  requestWakeLock();
+  showScreen('gameScreen');
+  updateDifficulty();
+  updateProfileDisplays();
+  setRoundBackground();
+  clearGameArea();
+
+  GameState.isRunning = true;
+  GameState.isPaused = false;
+  GameState.isRoundTransition = false;
+
+  $('pauseOverlay').classList.add('hidden');
+  $('roundOverlay').classList.add('hidden');
+  $('backModal').classList.add('hidden');
+  $('pauseBtn').textContent = '⏸';
+
+  updateHUD();
+  spawnWave();
+  startSpawning();
+  startSurvivalTimer();
+  scheduleRandomEvent();
+
+  GameState.lastFrameAt = performance.now();
+  GameState.animFrameId = requestAnimationFrame(gameLoop);
+}
+
+function startSpawning() {
+  clearInterval(GameState.spawnInterval);
+  GameState.spawnInterval = setInterval(spawnWave, GameState.spawnDelay);
+}
+
+function spawnWave() {
+  if (!GameState.isRunning || GameState.isPaused || GameState.isRoundTransition) return;
+
+  const extraChance = Math.min(0.65, 0.12 + (GameState.round * 0.045));
+  const count = 1 + (Math.random() < extraChance ? 1 : 0) + (GameState.round >= 5 && Math.random() < 0.18 ? 1 : 0);
+
+  for (let i = 0; i < count; i++) {
+    setTimeout(spawnEmoji, i * 105);
+  }
+}
+
+function startSurvivalTimer() {
+  clearInterval(GameState.gameTimer);
+  GameState.gameTimer = setInterval(() => {
+    if (!GameState.isRunning || GameState.isPaused || GameState.isRoundTransition) return;
+    GameState.elapsedSeconds++;
+    updateHUD();
+  }, 1000);
+}
+
+function gameLoop(now) {
+  if (!GameState.isRunning) return;
+
+  const previous = GameState.lastFrameAt || now;
+  const delta = Math.min(2.5, (now - previous) / 16.67);
+  GameState.lastFrameAt = now;
+
+  if (!GameState.isPaused && !GameState.isRoundTransition) {
+    updateFallingEmojis(delta);
+  }
+
+  GameState.animFrameId = requestAnimationFrame(gameLoop);
+}
+
+function spawnEmoji() {
+  if (!GameState.isRunning || GameState.isPaused || GameState.isRoundTransition) return;
+
+  const area = $('gameArea');
+  if (!area) return;
+
+  const rect = area.getBoundingClientRect();
+  const goodChance = Math.max(0.48, 0.68 - ((GameState.round - 1) * 0.018));
+  const isGood = Math.random() < goodChance;
+  const emoji = isGood ? pickRandom(GOOD_EMOJIS) : pickRandom(BAD_EMOJIS);
+  const size = Math.round(Math.max(34, Math.min(58, rect.width * 0.11)));
+  const x = Math.random() * Math.max(1, rect.width - size);
+
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = `falling-emoji ${isGood ? 'good-emoji' : 'bad-emoji'}`;
+  el.textContent = emoji;
+  el.setAttribute('aria-label', isGood ? `Catch ${emoji}` : `Do not catch ${emoji}`);
+  el.style.left = `${x}px`;
+  el.style.top = `${-size - 12}px`;
+  el.style.fontSize = `${size}px`;
+
+  const item = {
+    id: window.crypto?.randomUUID?.() || String(Math.random()),
+    el,
+    x,
+    y: -size - 12,
+    size,
+    speed: GameState.fallSpeed + Math.random() * (1.75 + GameState.round * 0.08),
+    isGood,
+    emoji,
+    hit: false,
+  };
+
+  el.addEventListener('pointerdown', event => handleEmojiClick(event, item));
+  area.appendChild(el);
+  GameState.emojis.push(item);
+}
+
+function updateFallingEmojis(delta) {
+  const area = $('gameArea');
+  if (!area) return;
+
+  const height = area.clientHeight;
+  GameState.emojis = GameState.emojis.filter(item => {
+    if (item.hit) return true;
+
+    item.y += item.speed * delta;
+    item.el.style.top = `${item.y}px`;
+
+    if (item.y > height + item.size + 20) {
+      item.el.remove();
+      return false;
+    }
+    return true;
+  });
+}
+
+function handleEmojiClick(event, item) {
+  event.preventDefault();
+  event.stopPropagation();
+
+  if (!GameState.isRunning || GameState.isPaused || GameState.isRoundTransition || item.hit) return;
+
+  item.hit = true;
+  const rect = item.el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+
+  if (item.isGood) {
+    GameState.score += 1;
+    item.el.classList.add('correct-hit');
+    showGreenGlow();
+    spawnExplosion(x, y, '#00ff88', 18);
+    showScoreFloat(x, y, `+1 ${item.emoji}`, '#00ff88');
+    playSound('correct');
+    updateHUD();
+
+    if (GameState.score >= GameState.targetScore) {
+      setTimeout(completeRound, 260);
+    }
+  } else {
+    GameState.score = Math.max(0, GameState.score - 1);
+    item.el.classList.add('wrong-hit');
+    showRedFlash();
+    shakeScreen();
+    spawnExplosion(x, y, '#ff2244', 24);
+    showScoreFloat(x, y, '-1 😭', '#ff2244');
+    showWarningMessage();
+    playSound('wrong');
+    updateHUD();
+  }
+
+  setTimeout(() => {
+    item.el.remove();
+    GameState.emojis = GameState.emojis.filter(active => active !== item);
+  }, item.isGood ? 420 : 520);
+}
+
+function completeRound() {
+  if (!GameState.isRunning || GameState.isRoundTransition) return;
+
+  GameState.isRoundTransition = true;
+  clearInterval(GameState.spawnInterval);
+  $('gameArea').classList.add('round-frozen');
+  $('gameScreen').classList.add('round-victory');
+
+  const nextRound = GameState.round + 1;
+  $('roundCompleteText').textContent = `🎉 ROUND ${GameState.round} COMPLETE 🎉`;
+  $('roundMessage').textContent = pickRandom(ROUND_MESSAGES);
+  $('roundCountdownNum').classList.remove('hidden');
+  $('roundCountdownNum').textContent = '10';
+  $('roundNextLabel').classList.add('hidden');
+  $('roundNextLabel').textContent = `🚀 ROUND ${nextRound} START 🚀`;
+  $('roundOverlay').classList.remove('hidden');
+
+  createConfetti();
+  createFireworks();
+  playSound('victory');
+
+  let count = 10;
+  const countdown = setInterval(() => {
+    count--;
+    if (count > 0) {
+      $('roundCountdownNum').textContent = String(count);
+      playSound('countdown');
+      createFireworks();
+      return;
+    }
+
+    clearInterval(countdown);
+    $('roundCountdownNum').classList.add('hidden');
+    $('roundNextLabel').classList.remove('hidden');
+    setTimeout(() => startNextRound(nextRound), 950);
+  }, 1000);
+}
+
+function startNextRound(round) {
+  GameState.round = round;
+  updateDifficulty();
+  selectRoundEmojis();
+  clearGameArea();
+  setRoundBackground();
+  $('roundOverlay').classList.add('hidden');
+  $('gameArea').classList.remove('round-frozen');
+  $('gameScreen').classList.remove('round-victory');
+  GameState.isRoundTransition = false;
+  updateHUD();
+  spawnWave();
+  startSpawning();
+}
+
+function scheduleRandomEvent() {
+  clearTimeout(GameState.randomEventTimer);
+  const delay = 15000 + Math.random() * 15000;
+  GameState.randomEventTimer = setTimeout(() => {
+    if (GameState.isRunning && !GameState.isPaused && !GameState.isRoundTransition) {
+      showRandomEvent();
+    }
+    scheduleRandomEvent();
+  }, delay);
+}
+
+function showRandomEvent() {
+  const el = $('randomEventPopup');
+  el.textContent = pickRandom(RANDOM_EVENTS);
+  el.classList.remove('hidden');
+  el.style.animation = 'none';
+  void el.offsetHeight;
+  el.style.animation = '';
+  setTimeout(() => el.classList.add('hidden'), 3000);
+}
+
+function showWarningMessage() {
+  const el = document.createElement('div');
+  el.className = 'warning-msg';
+  el.textContent = pickRandom(WARNING_MESSAGES);
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2100);
+}
+
+function showGreenGlow() {
+  const overlay = document.createElement('div');
+  overlay.className = 'green-glow-overlay';
+  document.body.appendChild(overlay);
+  setTimeout(() => overlay.remove(), 340);
+}
+
+function showRedFlash() {
+  const overlay = document.createElement('div');
+  overlay.className = 'red-flash';
+  document.body.appendChild(overlay);
+  setTimeout(() => overlay.remove(), 430);
+}
+
+function shakeScreen() {
+  const screen = $('gameScreen');
+  screen.classList.remove('screen-shake');
+  void screen.offsetHeight;
+  screen.classList.add('screen-shake');
+  setTimeout(() => screen.classList.remove('screen-shake'), 420);
+}
+
+function showScoreFloat(x, y, text, color) {
+  const el = document.createElement('div');
+  el.className = 'score-float';
+  el.textContent = text;
+  el.style.left = `${x}px`;
+  el.style.top = `${y}px`;
+  el.style.color = color;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1250);
+}
+
+function spawnExplosion(x, y, color, count = 18) {
+  for (let i = 0; i < count; i++) {
+    const particle = document.createElement('div');
+    const size = 5 + Math.random() * 7;
+    const angle = Math.random() * Math.PI * 2;
+    const distance = 34 + Math.random() * 58;
+    const dx = Math.cos(angle) * distance;
+    const dy = Math.sin(angle) * distance;
+
+    particle.className = 'particle';
+    particle.style.left = `${x}px`;
+    particle.style.top = `${y}px`;
+    particle.style.width = `${size}px`;
+    particle.style.height = `${size}px`;
+    particle.style.background = color;
+    particle.style.boxShadow = `0 0 12px ${color}`;
+    document.body.appendChild(particle);
+
+    particle.animate([
+      { transform: 'translate(-50%, -50%) scale(1)', opacity: 1 },
+      { transform: `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px)) scale(0)`, opacity: 0 },
+    ], {
+      duration: 620 + Math.random() * 260,
+      easing: 'cubic-bezier(.16,1,.3,1)',
+    }).onfinish = () => particle.remove();
+  }
+}
+
+function createConfetti() {
+  const wrap = $('roundConfetti');
+  wrap.innerHTML = '';
+  for (let i = 0; i < 80; i++) {
+    const piece = document.createElement('span');
+    piece.className = 'confetti-piece';
+    piece.style.left = `${Math.random() * 100}%`;
+    piece.style.background = pickRandom(['#00d4ff', '#bf00ff', '#00ff88', '#ffd700', '#ff2244']);
+    piece.style.animationDuration = `${1.5 + Math.random() * 1.8}s`;
+    piece.style.animationDelay = `${Math.random() * 0.8}s`;
+    wrap.appendChild(piece);
+  }
+}
+
+function createFireworks() {
+  const cx = window.innerWidth * (0.25 + Math.random() * 0.5);
+  const cy = window.innerHeight * (0.18 + Math.random() * 0.28);
+  spawnExplosion(cx, cy, pickRandom(['#ffd700', '#00d4ff', '#bf00ff', '#00ff88']), 30);
+}
+
+function updateHUD() {
+  if ($('scoreDisplay')) $('scoreDisplay').textContent = GameState.score.toLocaleString();
+  if ($('roundDisplay')) $('roundDisplay').textContent = GameState.round;
+  if ($('targetDisplay')) $('targetDisplay').textContent = GameState.targetScore.toLocaleString();
+  if ($('timerDisplay')) $('timerDisplay').textContent = formatSurvivalTime(GameState.elapsedSeconds);
+  if ($('catchEmojiDisplay')) $('catchEmojiDisplay').textContent = GameState.activeGood;
+  if ($('avoidEmojiDisplay')) $('avoidEmojiDisplay').textContent = GameState.activeBad;
+}
+
+function formatSurvivalTime(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function setRoundBackground() {
+  const screen = $('gameScreen');
+  screen.classList.remove('round-bg-1', 'round-bg-2', 'round-bg-3', 'round-bg-4', 'round-bg-5');
+  screen.classList.add(`round-bg-${((GameState.round - 1) % 5) + 1}`);
+}
+
+function togglePause() {
+  if (!GameState.isRunning || GameState.isRoundTransition) return;
+
+  GameState.isPaused = !GameState.isPaused;
+  $('pauseOverlay').classList.toggle('hidden', !GameState.isPaused);
+  $('gameArea').classList.toggle('game-paused', GameState.isPaused);
+  $('pauseBtn').textContent = GameState.isPaused ? '▶' : '⏸';
+}
+
+function confirmBack() {
+  if (!GameState.isRunning) {
+    showScreen('registrationScreen');
+    return;
+  }
+
+  backWasPaused = GameState.isPaused;
+  GameState.isPaused = true;
+  $('pauseOverlay').classList.add('hidden');
+  $('gameArea').classList.add('game-paused');
+  $('backModal').classList.remove('hidden');
+}
+
+function closeBackModal() {
+  $('backModal').classList.add('hidden');
+  if (GameState.isRunning && !backWasPaused) {
+    GameState.isPaused = false;
+    $('gameArea').classList.remove('game-paused');
+    $('pauseBtn').textContent = '⏸';
+  }
+}
+
+function goBackToMenu() {
+  $('backModal').classList.add('hidden');
+  endGame();
+}
+
+function endGame() {
+  if (!GameState.isRunning) return;
+
+  GameState.isRunning = false;
+  GameState.isPaused = false;
+  GameState.isRoundTransition = false;
+  clearGameplayTimers();
+  clearGameArea();
+  $('pauseOverlay').classList.add('hidden');
+  $('roundOverlay').classList.add('hidden');
+  $('gameArea').classList.remove('game-paused', 'round-frozen');
+  $('gameScreen').classList.remove('round-victory');
+
+  const finalScore = Math.max(0, Math.floor(GameState.score));
+  showScreen('gameOverScreen');
+
+  $('resultSelfie').src = GameState.selfieData;
+  $('resultName').textContent  = GameState.playerName;
+  $('resultScore').textContent = finalScore.toLocaleString();
+  $('resultRank').textContent  = '';
+  $('resultExtra').textContent = `Round ${GameState.round} • Time survived ${formatSurvivalTime(GameState.elapsedSeconds)}`;
+  $('savingStatus').innerHTML  = '<span class="saving-spinner"></span> Saving score online...';
+  $('savingStatus').style.display = 'flex';
+
+  savePlayerScore(GameState.playerName, finalScore, GameState.selfieData)
+    .then(rank => {
+      GameState.lastRank = rank;
+      $('resultRank').textContent = rank ? `🏅 Rank #${rank} Worldwide` : '';
+      $('savingStatus').innerHTML = 'Score saved!';
+      setTimeout(() => { $('savingStatus').style.display = 'none'; }, 2500);
+    })
+    .catch(() => {
+      $('savingStatus').innerHTML = 'Could not save score (check server config)';
+    });
+}
+
+function playAgain() {
+  GameState.score = 0;
+  GameState.round = 1;
+  GameState.targetScore = getTargetForRound(1);
+  GameState.elapsedSeconds = 0;
+  updateRegistrationState();
+  showScreen('registrationScreen');
+}
+
+function updateProfileDisplays() {
+  if ($('hudProfileImg') && GameState.selfieData) $('hudProfileImg').src = GameState.selfieData;
+  if ($('modalProfileImg') && GameState.selfieData) $('modalProfileImg').src = GameState.selfieData;
+  if ($('registrationProfileImg') && GameState.selfieData) $('registrationProfileImg').src = GameState.selfieData;
+  if ($('registrationProfileName')) {
+    $('registrationProfileName').textContent = GameState.playerName || sanitizeName($('playerName').value.trim()) || 'PROFILE';
+  }
+}
+
+function hasCompleteProfile() {
+  return sanitizeName($('playerName').value.trim()).length >= 2 && GameState.selfieData !== '';
+}
+
+function syncRegistrationProfileUI() {
+  const ready = hasCompleteProfile();
+  const regContainer = document.querySelector('.reg-container');
+  if (!regContainer || !$('registrationProfileBtn')) return;
+
+  regContainer.classList.toggle('profile-ready', ready);
+  $('registrationProfileBtn').classList.toggle('hidden', !ready);
+
+  if (ready) {
+    GameState.playerName = sanitizeName($('playerName').value.trim());
+    updateProfileDisplays();
+    stopStream(cameraStream);
+    cameraStream = null;
+  }
+}
+
+function updateRegistrationState() {
+  if (GameState.selfieData) {
+    $('cameraVideo').classList.add('hidden');
+    $('selfieCanvas').classList.remove('hidden');
+    $('cameraOverlay').classList.add('hidden');
+    $('startCameraBtn').classList.add('hidden');
+    $('captureBtn').classList.add('hidden');
+    $('retakeBtn').classList.remove('hidden');
+  }
+  syncRegistrationProfileUI();
+  validateForm();
+}
+
+function showProfileModal() {
+  if (!GameState.selfieData) return;
+
+  profileWasPaused = GameState.isPaused;
+  if (GameState.isRunning && !GameState.isPaused && !GameState.isRoundTransition) {
+    GameState.isPaused = true;
+    $('gameArea').classList.add('game-paused');
+  }
+
+  GameState.modalSelfieData = GameState.selfieData;
+  $('modalPlayerName').value = GameState.playerName || $('playerName').value.trim();
+  $('modalProfileImg').src = GameState.selfieData;
+  $('modalNameError').textContent = '';
+  $('profileModal').classList.remove('hidden');
+}
+
+function closeProfileModal() {
+  stopStream(modalCameraStream);
+  modalCameraStream = null;
+  $('profileModal').classList.add('hidden');
+  $('modalCameraVideo').classList.remove('hidden');
+  $('modalSelfieCanvas').classList.add('hidden');
+  $('modalCameraOverlay').classList.remove('hidden');
+  $('modalStartCameraBtn').classList.remove('hidden');
+  $('modalCaptureBtn').classList.add('hidden');
+  $('modalRetakeBtn').classList.add('hidden');
+
+  if (GameState.isRunning && !profileWasPaused) {
+    GameState.isPaused = false;
+    $('gameArea').classList.remove('game-paused');
+    $('pauseBtn').textContent = '⏸';
+  }
+}
+
+async function modalStartCamera() {
+  const video = $('modalCameraVideo');
+  try {
+    modalCameraStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false,
+    });
+    video.srcObject = modalCameraStream;
+    $('modalCameraOverlay').classList.add('hidden');
+    $('modalStartCameraBtn').classList.add('hidden');
+    $('modalCaptureBtn').classList.remove('hidden');
+  } catch (err) {
+    $('modalNameError').textContent = 'Camera access denied.';
+    console.error('Profile camera error:', err);
+  }
+}
+
+function modalCaptureSelfie() {
+  const video = $('modalCameraVideo');
+  const canvas = $('modalSelfieCanvas');
+  const ctx = canvas.getContext('2d');
+
+  canvas.width = video.videoWidth || 640;
+  canvas.height = video.videoHeight || 480;
+  ctx.save();
+  ctx.scale(-1, 1);
+  ctx.drawImage(video, -canvas.width, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  GameState.modalSelfieData = canvas.toDataURL('image/jpeg', 0.7);
+  $('modalProfileImg').src = GameState.modalSelfieData;
+  video.classList.add('hidden');
+  canvas.classList.remove('hidden');
+  $('modalCaptureBtn').classList.add('hidden');
+  $('modalRetakeBtn').classList.remove('hidden');
+  stopStream(modalCameraStream);
+  modalCameraStream = null;
+}
+
+function modalRetakeSelfie() {
+  $('modalCameraVideo').classList.remove('hidden');
+  $('modalSelfieCanvas').classList.add('hidden');
+  $('modalRetakeBtn').classList.add('hidden');
+  $('modalStartCameraBtn').classList.remove('hidden');
+  $('modalCameraOverlay').classList.remove('hidden');
+}
+
+function saveProfile() {
+  const name = sanitizeName($('modalPlayerName').value.trim());
+  if (name.length < 2) {
+    $('modalNameError').textContent = 'Name must be at least 2 characters.';
+    return;
+  }
+
+  GameState.playerName = name;
+  GameState.selfieData = GameState.modalSelfieData || GameState.selfieData;
+  $('playerName').value = name;
+
+  const canvas = $('selfieCanvas');
+  const ctx = canvas.getContext('2d');
+  const img = new Image();
+  img.onload = () => {
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    ctx.drawImage(img, 0, 0);
+  };
+  img.src = GameState.selfieData;
+
+  updateProfileDisplays();
+  updateRegistrationState();
+  closeProfileModal();
+}
+
 /* ═══════════════════════════════════════════════════════════════
    TOUCH SUPPORT
 ═══════════════════════════════════════════════════════════════ */
@@ -954,6 +1686,6 @@ document.addEventListener('visibilitychange', () => {
   // Unlock AudioContext on first interaction
   document.addEventListener('pointerdown', () => getAudioCtx(), { once: true });
 
-  console.log('%c🎯 SHOOTING CHALLENGE by Jayver Algadipe', 'color:#bf00ff;font-size:16px;font-weight:bold');
+  console.log("%c😂 DON'T CATCH THAT! 💩 by Jayver Algadipe", 'color:#bf00ff;font-size:16px;font-weight:bold');
   console.log('%cConfigure JSONBIN_BIN_ID and JSONBIN_API_KEY in Vercel for the online leaderboard.', 'color:#00d4ff');
 })();

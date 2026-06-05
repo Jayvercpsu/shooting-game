@@ -1,5 +1,5 @@
 const JSONBIN_ROOT = "https://api.jsonbin.io/v3/b";
-const MAX_SCORE = 60 * 10 * 10 * 100;
+const MAX_SCORE = 10000000;
 
 function sendJson(res, statusCode, payload) {
   res.statusCode = statusCode;
